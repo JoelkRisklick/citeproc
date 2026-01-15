@@ -1,22 +1,22 @@
 import express from "express";
 import { localeEnUS, normalizeCslItem } from "./locale.js";
 import CSL from "citeproc";
-
+import * as cheerio from "cheerio";
 const app = express();
 app.use(express.json({ limit: "1mb" }));
 
-// Endpoint: /create-csl-engine-once
+// Endpoint: /render-citations
 // Expects body: { publicationsById, styleXml, [localeXml] }
-app.post("/create-csl-engine-once", async (req, res) => {
+
+app.post("/render-citations", async (req, res) => {
   try {
-    const { publicationsById, styleXml, localeXml } = req.body;
+    const { publicationsById, styleXml, localeXml, html } = req.body;
     if (!publicationsById || !styleXml) {
       return res
         .status(400)
         .json({ error: "Missing publicationsById or styleXml" });
     }
 
-    // Prepare sys object per createCslEngineOnce
     const sys = {
       retrieveItem(id) {
         const raw = publicationsById[id];
@@ -33,22 +33,74 @@ app.post("/create-csl-engine-once", async (req, res) => {
       },
     };
 
-    // Create citeproc engine
     const engine = new CSL.Engine(sys, styleXml, "en-US", true);
 
-    // We're not performing citation or bibliography output here;
-    // if you want to return something, e.g., a bibliography, you can extend this.
-    // For demonstration, just return an indication of success.
-    res.json({ message: "CSL Engine created successfully" });
+    const $ = cheerio.load(html, {
+      decodeEntities: true,
+      xmlMode: false,
+    });
+
+    const allIds = new Set();
+
+    $("citation").each((_, el) => {
+      const raw = $(el).attr("data-ref-ids");
+      if (!raw) return;
+
+      try {
+        const ids = JSON.parse(raw);
+        ids.forEach((id) => allIds.add(id));
+      } catch {}
+    });
+
+    engine.updateItems([...allIds]);
+
+    $("citation").each((_, el) => {
+      const raw = $(el).attr("data-ref-ids");
+      if (!raw) return;
+
+      let refIds;
+      try {
+        refIds = JSON.parse(raw);
+      } catch {
+        return;
+      }
+
+      if (!Array.isArray(refIds) || refIds.length === 0) return;
+
+      const rendered = engine.makeCitationCluster(refIds.map((id) => ({ id })));
+
+      const tooltip = refIds
+        .map((id) => {
+          const pub = publicationsById[id];
+          if (!pub) return null;
+
+          const author = pub.author?.[0]
+            ? [pub.author[0].family, pub.author[0].given]
+                .filter(Boolean)
+                .join(", ")
+            : "Unknown";
+
+          const year = pub.issued?.["date-parts"]?.[0]?.[0] ?? "n.d.";
+
+          return `${author} (${year}) — ${pub.title}`;
+        })
+        .filter(Boolean)
+        .join("\n");
+
+      $(el).attr("data-rendered", rendered);
+      $(el).attr("data-tooltip", tooltip);
+    });
+
+    res.json({
+      html: $.root().html(),
+    });
   } catch (err) {
     console.error("Error in /create-csl-engine-once:", err);
     res.status(500).json({ error: String(err) });
   }
 });
 
-// Endpoint: /create-bibliography-engine
-// Expects body: { publications, styleXml }
-app.post("/create-bibliography-engine", async (req, res) => {
+app.post("/render-bibliography", async (req, res) => {
   try {
     const { publications, styleXml } = req.body;
     if (!publications || !styleXml) {
@@ -59,32 +111,29 @@ app.post("/create-bibliography-engine", async (req, res) => {
 
     const sys = {
       retrieveItem(id) {
-        const item = publications[id];
-        if (!item) {
-          console.warn("[CSL] Missing item", id);
-        }
-        return item;
+        return publications[id] ?? null;
       },
       retrieveLocale(lang) {
-        if (lang === "en-US") {
-          return localeEnUS;
-        }
+        if (lang === "en-US") return localeEnUS;
         throw new Error("Unsupported locale: " + lang);
       },
     };
 
     const engine = new CSL.Engine(
       sys,
-      styleXml.trim().replace(/^\uFEFF/, ""),
+      styleXml.replace(/^\uFEFF/, ""),
       "en-US"
     );
+
     engine.updateItems(Object.keys(publications));
-    // Let's return the bibliography HTML output as in the original handler
+
     const bibliography = engine.makeBibliography();
 
-    res.json({ html: bibliography[1].join("") });
+    res.json({
+      entries: bibliography[1],
+    });
   } catch (err) {
-    console.error("Error in /create-bibliography-engine:", err);
+    console.error("Error in /render-bibliography:", err);
     res.status(500).json({ error: String(err) });
   }
 });
@@ -94,5 +143,5 @@ app.get("/health", (_, res) => {
   res.json({ ok: true });
 });
 
-const PORT = process.env.PORT || 3000;
+const PORT = process.env.PORT || 3001;
 app.listen(PORT, () => console.log(`Citeproc service running on ${PORT}`));
