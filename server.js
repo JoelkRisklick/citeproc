@@ -52,7 +52,9 @@ app.post("/render-citations", async (req, res) => {
       } catch {}
     });
 
-    engine.updateItems([...allIds]);
+    // Inc case adding to database fails but citation stays in the editor. That id should not be send
+    const validIds = [...allIds].filter((id) => publicationsById[id]);
+    engine.updateItems([...validIds]);
 
     $("citation").each((_, el) => {
       const raw = $(el).attr("data-ref-ids");
@@ -66,10 +68,12 @@ app.post("/render-citations", async (req, res) => {
       }
 
       if (!Array.isArray(refIds) || refIds.length === 0) return;
+      const validRefIds = refIds.filter((id) => publicationsById[id]);
+      const rendered = engine.makeCitationCluster(
+        validRefIds.map((id) => ({ id }))
+      );
 
-      const rendered = engine.makeCitationCluster(refIds.map((id) => ({ id })));
-
-      const tooltip = refIds
+      const tooltip = validRefIds
         .map((id) => {
           const pub = publicationsById[id];
           if (!pub) return null;
@@ -91,9 +95,33 @@ app.post("/render-citations", async (req, res) => {
       $(el).attr("data-tooltip", tooltip);
     });
 
-    res.json({
-      html: $.root().html(),
+    const sections = [];
+
+    $("section[data-paragraph-id]").each((_, el) => {
+      const paragraphId = $(el).attr("data-paragraph-id");
+      if (!paragraphId) return;
+
+      sections.push({
+        paragraphId,
+        html: $(el).html() ?? "",
+      });
     });
+
+    res.json({
+      sections,
+    });
+    {
+  // "sections": [
+  //   {
+  //     "paragraphId": "section-1-id",
+  //     "html": "<p>Text with [1]</p>"
+  //   },
+  //   {
+  //     "paragraphId": "section-2-id",
+  //     "html": "<p>Text with [2,3]</p>"
+  //   }
+  // ]
+}
   } catch (err) {
     console.error("Error in /create-csl-engine-once:", err);
     res.status(500).json({ error: String(err) });
@@ -143,5 +171,5 @@ app.get("/health", (_, res) => {
   res.json({ ok: true });
 });
 
-const PORT = process.env.PORT || 3001;
+const PORT = process.env.PORT || 3003;
 app.listen(PORT, () => console.log(`Citeproc service running on ${PORT}`));
